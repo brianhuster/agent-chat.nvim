@@ -1,0 +1,413 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/neovim/go-client/nvim"
+)
+
+// ACPSession represents a single ACP session tied to a buffer
+type ACPSession struct {
+	bufnr       int
+	nvim        *nvim.Nvim
+	conn        *acp.ClientSideConnection
+	sessionID   acp.SessionId
+	ctx         context.Context
+	cancel      context.CancelFunc
+	cmd         *exec.Cmd
+	autoApprove bool
+}
+
+// SessionManager manages multiple ACP sessions
+type SessionManager struct {
+	nvim     *nvim.Nvim
+	mu       sync.Mutex
+	sessions map[int]*ACPSession
+}
+
+type acpClientImpl struct {
+	session *ACPSession
+}
+
+var _ acp.Client = (*acpClientImpl)(nil)
+
+// RequestPermission handles permission requests from ACP
+func (c *acpClientImpl) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	// If auto-approve is enabled, automatically select first allow option
+	if c.session.autoApprove {
+		for _, o := range params.Options {
+			if o.Kind == acp.PermissionOptionKindAllowOnce || o.Kind == acp.PermissionOptionKindAllowAlways {
+				return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: o.OptionId}}}, nil
+			}
+		}
+		if len(params.Options) > 0 {
+			return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: params.Options[0].OptionId}}}, nil
+		}
+		return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+	}
+
+	// Build interactive menu
+	title := ""
+	if params.ToolCall.Title != nil {
+		title = *params.ToolCall.Title
+	}
+
+	// Build the prompt list for inputlist()
+	// Format: ["Permission requested: <title>", "1. Option 1", "2. Option 2", ...]
+	promptLines := []string{fmt.Sprintf("Permission requested: %s", title)}
+	for i, opt := range params.Options {
+		promptLines = append(promptLines, fmt.Sprintf("%d. %s (%s)", i+1, opt.Name, opt.Kind))
+	}
+
+	// Call inputlist() directly from Go
+	var choice int
+	err := c.session.nvim.Call("inputlist", &choice, promptLines)
+	if err != nil {
+		log.Printf("Error calling inputlist: %v\n", err)
+		return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+	}
+
+	// choice is 1-indexed, 0 means cancelled or invalid
+	if choice < 1 || choice > len(params.Options) {
+		c.session.appendToBuffer("\n[Permission denied]\n")
+		return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+	}
+
+	// Get the selected option
+	selectedOption := params.Options[choice-1]
+	c.session.appendToBuffer(fmt.Sprintf("\n[Permission granted: %s]\n", selectedOption.Name))
+
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: selectedOption.OptionId}}}, nil
+}
+
+// SessionUpdate handles streaming updates from ACP
+func (c *acpClientImpl) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	u := params.Update
+	log.Printf("SessionUpdate received: %+v\n", u)
+	switch {
+	case u.AgentMessageChunk != nil:
+		content := u.AgentMessageChunk.Content
+		if content.Text != nil {
+			log.Printf("Appending text: %s\n", content.Text.Text)
+			c.session.appendToBuffer(content.Text.Text)
+		}
+	case u.ToolCall != nil:
+		c.session.appendToBuffer(fmt.Sprintf("\n🔧 %s (%s)\n", u.ToolCall.Title, u.ToolCall.Status))
+	case u.ToolCallUpdate != nil:
+		c.session.appendToBuffer(fmt.Sprintf("\n🔧 Tool call `%s` updated: %v\n", u.ToolCallUpdate.ToolCallId, u.ToolCallUpdate.Status))
+	case u.Plan != nil:
+		c.session.appendToBuffer("[Plan update]\n")
+	case u.AgentThoughtChunk != nil:
+		thought := u.AgentThoughtChunk.Content
+		if thought.Text != nil {
+			c.session.appendToBuffer(fmt.Sprintf("[Thought] %s\n", thought.Text.Text))
+		}
+	case u.UserMessageChunk != nil:
+		// Silent for user messages
+	}
+	return nil
+}
+
+// WriteTextFile implements file writing capability
+func (c *acpClientImpl) WriteTextFile(ctx context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	if !filepath.IsAbs(params.Path) {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
+	}
+	dir := filepath.Dir(params.Path)
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return acp.WriteTextFileResponse{}, fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(params.Path, []byte(params.Content), 0o644); err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("write %s: %w", params.Path, err)
+	}
+	c.session.appendToBuffer(fmt.Sprintf("[Wrote %d bytes to %s]\n", len(params.Content), params.Path))
+	return acp.WriteTextFileResponse{}, nil
+}
+
+// ReadTextFile implements file reading capability
+func (c *acpClientImpl) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	if !filepath.IsAbs(params.Path) {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
+	}
+	b, err := os.ReadFile(params.Path)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("read %s: %w", params.Path, err)
+	}
+	content := string(b)
+	if params.Line != nil || params.Limit != nil {
+		lines := strings.Split(content, "\n")
+		start := 0
+		if params.Line != nil && *params.Line > 0 {
+			start = min(max(*params.Line-1, 0), len(lines))
+		}
+		end := len(lines)
+		if params.Limit != nil && *params.Limit > 0 {
+			if start+*params.Limit < end {
+				end = start + *params.Limit
+			}
+		}
+		content = strings.Join(lines[start:end], "\n")
+	}
+	c.session.appendToBuffer(fmt.Sprintf("[Read %s (%d bytes)]\n", params.Path, len(content)))
+	return acp.ReadTextFileResponse{Content: content}, nil
+}
+
+// Terminal methods (no-op implementations)
+func (c *acpClientImpl) CreateTerminal(ctx context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{TerminalId: "term-1"}, nil
+}
+
+func (c *acpClientImpl) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{Output: "", Truncated: false}, nil
+}
+
+func (c *acpClientImpl) ReleaseTerminal(ctx context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, nil
+}
+
+func (c *acpClientImpl) WaitForTerminalExit(ctx context.Context, params acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, nil
+}
+
+func (c *acpClientImpl) KillTerminalCommand(ctx context.Context, params acp.KillTerminalCommandRequest) (acp.KillTerminalCommandResponse, error) {
+	return acp.KillTerminalCommandResponse{}, nil
+}
+
+// SessionManager methods exposed to Lua
+
+// ACPStart initializes an ACP connection for a buffer
+func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string]map[string]string) (any, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.sessions[bufnr]; exists {
+		return nil, fmt.Errorf("ACP session already exists for buffer %d", bufnr)
+	}
+
+	session := &ACPSession{
+		bufnr:       bufnr,
+		nvim:        m.nvim,
+		autoApprove: false,
+	}
+
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+
+	// Start the agent process
+	cmd := exec.CommandContext(session.ctx, agent_cmd[0], agent_cmd[1:]...)
+	cmd.Stderr = os.Stderr
+
+	// Set environment variables from opts.env if provided
+	if opts != nil && opts["env"] != nil {
+		cmd.Env = os.Environ()
+		for key, value := range opts["env"] {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe error: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe error: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start %s: %w", agent_cmd[0], err)
+	}
+	session.cmd = cmd
+
+	client := &acpClientImpl{session: session}
+	session.conn = acp.NewClientSideConnection(client, stdin, stdout)
+
+	// Initialize
+	_, err = session.conn.Initialize(session.ctx, acp.InitializeRequest{
+		ProtocolVersion: acp.ProtocolVersionNumber,
+		ClientCapabilities: acp.ClientCapabilities{
+			Fs:       acp.FileSystemCapability{ReadTextFile: true, WriteTextFile: true},
+			Terminal: true,
+		},
+	})
+	if err != nil {
+		session.cleanup()
+		if re, ok := err.(*acp.RequestError); ok {
+			if b, mErr := json.MarshalIndent(re, "", "  "); mErr == nil {
+				return nil, fmt.Errorf("initialize error: %s", string(b))
+			}
+			return nil, fmt.Errorf("initialize error (%d): %s", re.Code, re.Message)
+		}
+		return nil, fmt.Errorf("initialize error: %w", err)
+	}
+
+	// Create new session
+	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd = "."
+	}
+	newSess, err := session.conn.NewSession(session.ctx, acp.NewSessionRequest{
+		Cwd:        cwd,
+		McpServers: []acp.McpServer{},
+	})
+	if err != nil {
+		session.cleanup()
+		if re, ok := err.(*acp.RequestError); ok {
+			if b, mErr := json.MarshalIndent(re, "", "  "); mErr == nil {
+				return nil, fmt.Errorf("newSession error: %s", string(b))
+			}
+			return nil, fmt.Errorf("newSession error (%d): %s", re.Code, re.Message)
+		}
+		return nil, fmt.Errorf("newSession error: %w", err)
+	}
+	session.sessionID = newSess.SessionId
+
+	m.sessions[bufnr] = session
+	return nil, nil
+}
+
+// ACPStop closes the ACP connection for a buffer
+func (m *SessionManager) ACPStop(bufnr int) (any, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, exists := m.sessions[bufnr]
+	if !exists {
+		return nil, fmt.Errorf("no ACP session for buffer %d", bufnr)
+	}
+
+	session.cleanup()
+	session.appendToBuffer("Connection closed.\n")
+	delete(m.sessions, bufnr)
+	return nil, nil
+}
+
+// ACPSendPrompt sends a prompt to OpenCode for a specific buffer
+func (m *SessionManager) ACPSendPrompt(bufnr int, prompt string) (any, error) {
+	if prompt == "" {
+		return nil, fmt.Errorf("no prompt provided")
+	}
+
+	m.mu.Lock()
+	session, exists := m.sessions[bufnr]
+	m.mu.Unlock()
+
+	if !exists {
+		return nil, fmt.Errorf("no ACP session for buffer %d", bufnr)
+	}
+
+	_, err := session.conn.Prompt(session.ctx, acp.PromptRequest{
+		SessionId: session.sessionID,
+		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
+	})
+	if err != nil {
+		if re, ok := err.(*acp.RequestError); ok {
+			if b, mErr := json.MarshalIndent(re, "", "  "); mErr == nil {
+				session.appendToBuffer(fmt.Sprintf("Error: %s\n", string(b)))
+			} else {
+				session.appendToBuffer(fmt.Sprintf("Error (%d): %s\n", re.Code, re.Message))
+			}
+			return nil, err
+		}
+		session.appendToBuffer(fmt.Sprintf("Error: %v\n", err))
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+// ACPCancel cancels the current prompt for a buffer
+func (m *SessionManager) ACPCancel(bufnr int) (any, error) {
+	m.mu.Lock()
+	session, exists := m.sessions[bufnr]
+	m.mu.Unlock()
+
+	if !exists {
+		return nil, fmt.Errorf("no ACP session for buffer %d", bufnr)
+	}
+
+	err := session.conn.Cancel(session.ctx, acp.CancelNotification{SessionId: session.sessionID})
+	if err != nil {
+		session.appendToBuffer(fmt.Sprintf("Cancel error: %v\n", err))
+		return nil, err
+	}
+	session.appendToBuffer("Cancelled.\n")
+	return nil, nil
+}
+
+// Helper methods
+
+func (s *ACPSession) cleanup() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
+	s.conn = nil
+	s.sessionID = ""
+	s.ctx = nil
+	s.cancel = nil
+	s.cmd = nil
+}
+
+func (s *ACPSession) appendToBuffer(text string) {
+	s.nvim.ExecLua(`require('agent-chat').append_text(...)`, nil, s.bufnr, text)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	// Turn off timestamps in output.
+	log.SetFlags(0)
+
+	// Direct writes by the application to stdout garble the RPC stream.
+	// Redirect the application's direct use of stdout to stderr.
+	stdout := os.Stdout
+	os.Stdout = os.Stderr
+
+	// Create a client connected to stdio. Configure the client to use the
+	// standard log package for logging.
+	v, err := nvim.New(os.Stdin, stdout, stdout, log.Printf)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create session manager
+	manager := &SessionManager{
+		nvim:     v,
+		sessions: make(map[int]*ACPSession),
+	}
+
+	// Register RPC handlers
+	v.RegisterHandler("ACPStart", manager.ACPStart)
+	v.RegisterHandler("ACPStop", manager.ACPStop)
+	v.RegisterHandler("ACPSendPrompt", manager.ACPSendPrompt)
+	v.RegisterHandler("ACPCancel", manager.ACPCancel)
+
+	// Serve RPC requests
+	if err := v.Serve(); err != nil {
+		log.Fatal(err)
+	}
+}
