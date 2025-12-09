@@ -398,40 +398,24 @@ func (s *ACPSession) appendToBuffer(text string) {
 }
 
 func (s *ACPSession) showDiff(path string, oldText *string, newText string) {
-	var diffLines []string
-	err := s.nvim.ExecLua(`
-		local old = select(1, ...)
-		local new = select(2, ...)
-		local path = select(3, ...)
-		
-		local old_lines = old and vim.split(old, '\n', { plain = true }) or {}
-		local new_lines = vim.split(new, '\n', { plain = true })
-		
-		local diff = vim.diff(table.concat(old_lines, '\n'), table.concat(new_lines, '\n'), {
-			result_type = 'unified',
-			ctxlen = 3,
-		})
-		
-		if diff then
-			return vim.split(diff, '\n', { plain = true })
-		else
-			return {}
-		end
-	`, &diffLines, oldText, newText, path)
+	var old string
+	if oldText != nil {
+		old = *oldText
+	}
+
+	var diff string
+	err := s.nvim.ExecLua(`return vim.text.diff(...)`, &diff, old, newText)
 
 	if err != nil {
 		log.Printf("Error generating diff: %v\n", err)
-		s.appendToBuffer(fmt.Sprintf("\n[Modified: %s]\n", path))
 		return
 	}
 
-	if len(diffLines) > 0 {
+	if diff != "" {
 		s.appendToBuffer("\n```diff\n")
 		s.appendToBuffer(fmt.Sprintf("--- %s\n+++ %s\n", path, path))
-		for _, line := range diffLines {
-			s.appendToBuffer(line + "\n")
-		}
-		s.appendToBuffer("```\n")
+		s.appendToBuffer(diff)
+		s.appendToBuffer("\n```\n")
 	}
 }
 
