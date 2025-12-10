@@ -92,12 +92,10 @@ func (c *acpClientImpl) RequestPermission(ctx context.Context, params acp.Reques
 // SessionUpdate handles streaming updates from ACP
 func (c *acpClientImpl) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
 	u := params.Update
-	log.Printf("SessionUpdate received: %+v\n", u)
 	switch {
 	case u.AgentMessageChunk != nil:
 		content := u.AgentMessageChunk.Content
 		if content.Text != nil {
-			log.Printf("Appending text: %s\n", content.Text.Text)
 			c.session.appendToBuffer(content.Text.Text)
 		}
 	case u.ToolCall != nil:
