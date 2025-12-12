@@ -2,275 +2,425 @@
 
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
+import * as path from "node:path";
 
 interface AgentSession {
-  pendingPrompt: AbortController | null;
+	pendingPrompt: AbortController | null;
 }
 
-class ExampleAgent implements acp.Agent {
-  private connection: acp.AgentSideConnection;
-  private sessions: Map<string, AgentSession>;
+class TestAgent implements acp.Agent {
+	private connection: acp.AgentSideConnection;
+	private sessions: Map<string, AgentSession>;
 
-  constructor(connection: acp.AgentSideConnection) {
-    this.connection = connection;
-    this.sessions = new Map();
-  }
+	constructor(connection: acp.AgentSideConnection) {
+		this.connection = connection;
+		this.sessions = new Map();
+	}
 
-  async initialize(
-    _params: acp.InitializeRequest,
-  ): Promise<acp.InitializeResponse> {
-    return {
-      protocolVersion: acp.PROTOCOL_VERSION,
-      agentCapabilities: {
-        loadSession: false,
-      },
-    };
-  }
+	async initialize(
+		_params: acp.InitializeRequest,
+	): Promise<acp.InitializeResponse> {
+		return {
+			protocolVersion: acp.PROTOCOL_VERSION,
+			agentCapabilities: {
+				loadSession: false,
+			},
+		};
+	}
 
-  async newSession(
-    _params: acp.NewSessionRequest,
-  ): Promise<acp.NewSessionResponse> {
-    const sessionId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+	async newSession(
+		_params: acp.NewSessionRequest,
+	): Promise<acp.NewSessionResponse> {
+		const sessionId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
 
-    this.sessions.set(sessionId, {
-      pendingPrompt: null,
-    });
+		this.sessions.set(sessionId, {
+			pendingPrompt: null,
+		});
 
-    return {
-      sessionId,
-    };
-  }
+		return {
+			sessionId,
+		};
+	}
 
-  async authenticate(
-    _params: acp.AuthenticateRequest,
-  ): Promise<acp.AuthenticateResponse | void> {
-    // No auth needed - return empty response
-    return {};
-  }
+	async authenticate(
+		_params: acp.AuthenticateRequest,
+	): Promise<acp.AuthenticateResponse | void> {
+		return {};
+	}
 
-  async setSessionMode(
-    _params: acp.SetSessionModeRequest,
-  ): Promise<acp.SetSessionModeResponse> {
-    // Session mode changes not implemented in this example
-    return {};
-  }
+	async setSessionMode(
+		_params: acp.SetSessionModeRequest,
+	): Promise<acp.SetSessionModeResponse> {
+		return {};
+	}
 
-  async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
-    const session = this.sessions.get(params.sessionId);
+	async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+		const session = this.sessions.get(params.sessionId);
 
-    if (!session) {
-      throw new Error(`Session ${params.sessionId} not found`);
-    }
+		if (!session) {
+			throw new Error(`Session ${params.sessionId} not found`);
+		}
 
-    session.pendingPrompt?.abort();
-    session.pendingPrompt = new AbortController();
+		session.pendingPrompt?.abort();
+		session.pendingPrompt = new AbortController();
 
-    try {
-      await this.simulateTurn(params.sessionId, session.pendingPrompt.signal);
-    } catch (err) {
-      if (session.pendingPrompt.signal.aborted) {
-        return { stopReason: "cancelled" };
-      }
+		try {
+			await this.handlePrompt(
+				params.sessionId,
+				params.prompt,
+				session.pendingPrompt.signal,
+			);
+		} catch (err) {
+			if (session.pendingPrompt.signal.aborted) {
+				return { stopReason: "cancelled" };
+			}
 
-      throw err;
-    }
+			throw err;
+		}
 
-    session.pendingPrompt = null;
+		session.pendingPrompt = null;
 
-    return {
-      stopReason: "end_turn",
-    };
-  }
+		return {
+			stopReason: "end_turn",
+		};
+	}
 
-  private async simulateTurn(
-    sessionId: string,
-    abortSignal: AbortSignal,
-  ): Promise<void> {
-    // Send initial text chunk
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: "I'll help you with that. Let me start by reading some files to understand the current situation.",
-        },
-      },
-    });
+	private async handlePrompt(
+		sessionId: string,
+		prompt: acp.ContentBlock[],
+		abortSignal: AbortSignal,
+	): Promise<void> {
+		// Extract text from prompt
+		let promptText = "";
+		for (const block of prompt) {
+			if (block.type === "text") {
+				promptText += block.text;
+			}
+		}
 
-    await this.simulateModelInteraction(abortSignal);
+		// Rule-based responses based on prompt
+		if (promptText === "test:text") {
+			await this.handleTextTest(sessionId, abortSignal);
+		} else if (promptText === "test:read") {
+			await this.handleReadTest(sessionId, abortSignal);
+		} else if (promptText === "test:write") {
+			await this.handleWriteTest(sessionId, abortSignal);
+		} else {
+			// Default response
+			await this.connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: `I received your message: "${promptText}". Use test:text, test:read, or test:write for specific tests.`,
+					},
+				},
+			});
+		}
+	}
 
-    // Send a tool call that doesn't need permission
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "call_1",
-        title: "Reading project files",
-        kind: "read",
-        status: "pending",
-        locations: [{ path: "/project/README.md" }],
-        rawInput: { path: "/project/README.md" },
-      },
-    });
+	private async handleTextTest(
+		sessionId: string,
+		abortSignal: AbortSignal,
+	): Promise<void> {
+		await this.connection.sessionUpdate({
+			sessionId,
+			update: {
+				sessionUpdate: "agent_message_chunk",
+				content: {
+					type: "text",
+					text: "This is a simple text response for testing. No file operations needed!",
+				},
+			},
+		});
+	}
 
-    await this.simulateModelInteraction(abortSignal);
+	private formatFileContent(content: string, filePath: string): string {
+		const lines = content.split("\n");
+		const totalLines = lines.length;
+		
+		// Format with line numbers like cat -n
+		let formatted = "<file>\n";
+		lines.forEach((line, index) => {
+			const lineNum = (index + 1).toString().padStart(5, "0");
+			formatted += `${lineNum}| ${line}\n`;
+		});
+		formatted += `\n(End of file - total ${totalLines} lines)\n</file>`;
+		
+		return formatted;
+	}
 
-    // Update tool call to completed
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call_update",
-        toolCallId: "call_1",
-        status: "completed",
-        content: [
-          {
-            type: "content",
-            content: {
-              type: "text",
-              text: "# My Project\n\nThis is a sample project...",
-            },
-          },
-        ],
-        rawOutput: { content: "# My Project\n\nThis is a sample project..." },
-      },
-    });
+	private async handleReadTest(
+		sessionId: string,
+		abortSignal: AbortSignal,
+	): Promise<void> {
+		const testFilePath = path.join(process.cwd(), "test-read.txt");
 
-    await this.simulateModelInteraction(abortSignal);
+		await this.connection.sessionUpdate({
+			sessionId,
+			update: {
+				sessionUpdate: "agent_message_chunk",
+				content: {
+					type: "text",
+					text: "I'll read the test file for you using the file system client.",
+				},
+			},
+		});
 
-    // Send more text
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: " Now I understand the project structure. I need to make some changes to improve it.",
-        },
-      },
-    });
+		await this.simulateDelay(abortSignal, 300);
 
-    await this.simulateModelInteraction(abortSignal);
+		// Send tool call
+		await this.connection.sessionUpdate({
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: "read_1",
+				title: `Reading ${path.basename(testFilePath)}`,
+				kind: "read",
+				status: "pending",
+				locations: [{ path: testFilePath }],
+				rawInput: { path: testFilePath },
+			},
+		});
 
-    // Send a tool call that DOES need permission
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "call_2",
-        title: "Modifying critical configuration file",
-        kind: "edit",
-        status: "pending",
-        locations: [{ path: "/project/config.json" }],
-        rawInput: {
-          path: "/project/config.json",
-          content: '{"database": {"host": "new-host"}}',
-        },
-      },
-    });
+		// Request permission
+		const readPermission = await this.connection.requestPermission({
+			sessionId,
+			toolCall: {
+				toolCallId: "read_1",
+				title: `Reading ${path.basename(testFilePath)}`,
+				kind: "read",
+				status: "pending",
+				locations: [{ path: testFilePath }],
+				rawInput: { path: testFilePath },
+			},
+			options: [
+				{
+					kind: "allow_once",
+					name: "Allow reading",
+					optionId: "allow",
+				},
+				{
+					kind: "reject_once",
+					name: "Reject",
+					optionId: "reject",
+				},
+			],
+		});
 
-    // Request permission for the sensitive operation
-    const permissionResponse = await this.connection.requestPermission({
-      sessionId,
-      toolCall: {
-        toolCallId: "call_2",
-        title: "Modifying critical configuration file",
-        kind: "edit",
-        status: "pending",
-        locations: [{ path: "/home/user/project/config.json" }],
-        rawInput: {
-          path: "/home/user/project/config.json",
-          content: '{"database": {"host": "new-host"}}',
-        },
-      },
-      options: [
-        {
-          kind: "allow_once",
-          name: "Allow this change",
-          optionId: "allow",
-        },
-        {
-          kind: "reject_once",
-          name: "Skip this change",
-          optionId: "reject",
-        },
-      ],
-    });
+		if (
+			readPermission.outcome.outcome === "selected" &&
+			readPermission.outcome.optionId === "allow"
+		) {
+			try {
+				// Use ACP client's ReadTextFile capability
+				const result = await this.connection.readTextFile({
+					sessionId: sessionId,
+					path: testFilePath,
+				});
 
-    if (permissionResponse.outcome.outcome === "cancelled") {
-      return;
-    }
+				// Format file content with line numbers
+				const formattedContent = this.formatFileContent(result.content, testFilePath);
 
-    switch (permissionResponse.outcome.optionId) {
-      case "allow": {
-        await this.connection.sessionUpdate({
-          sessionId,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: "call_2",
-            status: "completed",
-            rawOutput: { success: true, message: "Configuration updated" },
-          },
-        });
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "read_1",
+						status: "completed",
+						content: [
+							{
+								type: "content",
+								content: {
+									type: "text",
+									text: formattedContent,
+								},
+							},
+						],
+						rawOutput: { content: result.content },
+					},
+				});
 
-        await this.simulateModelInteraction(abortSignal);
+				await this.simulateDelay(abortSignal, 200);
 
-        await this.connection.sessionUpdate({
-          sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: " Perfect! I've successfully updated the configuration. The changes have been applied.",
-            },
-          },
-        });
-        break;
-      }
-      case "reject": {
-        await this.simulateModelInteraction(abortSignal);
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						content: {
+							type: "text",
+							text: " Successfully read the file!",
+						},
+					},
+				});
+			} catch (err) {
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "read_1",
+						status: "failed",
+						rawOutput: { error: String(err) },
+					},
+				});
+			}
+		} else {
+			await this.connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: " Read operation was cancelled.",
+					},
+				},
+			});
+		}
+	}
 
-        await this.connection.sessionUpdate({
-          sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: " I understand you prefer not to make that change. I'll skip the configuration update.",
-            },
-          },
-        });
-        break;
-      }
-      default:
-        throw new Error(
-          `Unexpected permission outcome ${permissionResponse.outcome}`,
-        );
-    }
-  }
+	private async handleWriteTest(
+		sessionId: string,
+		abortSignal: AbortSignal,
+	): Promise<void> {
+		const writeFilePath = path.join(process.cwd(), "test-write.txt");
+		const writeContent = `Test data written at ${new Date().toISOString()}`;
 
-  private simulateModelInteraction(abortSignal: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) =>
-      setTimeout(() => {
-        // In a real agent, you'd pass this abort signal to the LLM client
-        if (abortSignal.aborted) {
-          reject();
-        } else {
-          resolve();
-        }
-      }, 1000),
-    );
-  }
+		await this.connection.sessionUpdate({
+			sessionId,
+			update: {
+				sessionUpdate: "agent_message_chunk",
+				content: {
+					type: "text",
+					text: "I'll write some test data to a file using the file system client.",
+				},
+			},
+		});
 
-  async cancel(params: acp.CancelNotification): Promise<void> {
-    this.sessions.get(params.sessionId)?.pendingPrompt?.abort();
-  }
+		await this.simulateDelay(abortSignal, 300);
+
+		// Send tool call
+		await this.connection.sessionUpdate({
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: "write_1",
+				title: `Writing ${path.basename(writeFilePath)}`,
+				kind: "edit",
+				status: "pending",
+				locations: [{ path: writeFilePath }],
+				rawInput: { path: writeFilePath, content: writeContent },
+			},
+		});
+
+		// Request permission
+		const writePermission = await this.connection.requestPermission({
+			sessionId,
+			toolCall: {
+				toolCallId: "write_1",
+				title: `Writing ${path.basename(writeFilePath)}`,
+				kind: "edit",
+				status: "pending",
+				locations: [{ path: writeFilePath }],
+				rawInput: { path: writeFilePath, content: writeContent },
+			},
+			options: [
+				{
+					kind: "allow_once",
+					name: "Allow writing",
+					optionId: "allow",
+				},
+				{
+					kind: "reject_once",
+					name: "Reject",
+					optionId: "reject",
+				},
+			],
+		});
+
+		if (
+			writePermission.outcome.outcome === "selected" &&
+			writePermission.outcome.optionId === "allow"
+		) {
+			try {
+				// Use ACP client's WriteTextFile capability
+				await this.connection.writeTextFile({
+					sessionId: sessionId,
+					path: writeFilePath,
+					content: writeContent,
+				});
+
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "write_1",
+						status: "completed",
+						rawOutput: { success: true, bytesWritten: writeContent.length },
+					},
+				});
+
+				await this.simulateDelay(abortSignal, 200);
+
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						content: {
+							type: "text",
+							text: ` Successfully wrote ${writeContent.length} bytes!`,
+						},
+					},
+				});
+			} catch (err) {
+				await this.connection.sessionUpdate({
+					sessionId,
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "write_1",
+						status: "failed",
+						rawOutput: { error: String(err) },
+					},
+				});
+			}
+		} else {
+			await this.connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: " Write operation was cancelled.",
+					},
+				},
+			});
+		}
+	}
+
+	private simulateDelay(
+		abortSignal: AbortSignal,
+		ms: number,
+	): Promise<void> {
+		return new Promise((resolve, reject) =>
+			setTimeout(() => {
+				if (abortSignal.aborted) {
+					reject(new Error("Aborted"));
+				} else {
+					resolve();
+				}
+			}, ms),
+		);
+	}
+
+	async cancel(params: acp.CancelNotification): Promise<void> {
+		this.sessions.get(params.sessionId)?.pendingPrompt?.abort();
+	}
 }
 
 const input = Writable.toWeb(process.stdout);
 const output = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
 const stream = acp.ndJsonStream(input, output);
-new acp.AgentSideConnection((conn) => new ExampleAgent(conn), stream);
+new acp.AgentSideConnection((conn) => new TestAgent(conn), stream);

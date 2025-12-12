@@ -84,7 +84,7 @@ function M.start(agent)
 	vim.api.nvim_buf_set_name(bufnr, "ACP: " .. agent)
 
 	-- Set up prompt
-	vim.fn.prompt_setprompt(bufnr, "> ")
+	vim.fn.prompt_setprompt(bufnr, "> User: ")
     vim.fn.prompt_setcallback(bufnr, function(text)
 		M.append_text(bufnr, "\n\n")
 		M.send_prompt(bufnr, text)

@@ -1,8 +1,16 @@
 {
+  "name": "agent-chat-nvim-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "tsx test.ts"
+  },
   "devDependencies": {
-    "@types/node": "^24.10.2"
+    "@types/node": "^24.10.2",
+    "tsx": "^4.19.2"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.8.0"
+    "@agentclientprotocol/sdk": "^0.8.0",
+    "neovim": "^5.1.0"
   }
 }
