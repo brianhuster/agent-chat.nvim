@@ -7,7 +7,3 @@ end, {
     desc = "Start ACP connection and open chat window.",
 	complete = "custom,v:lua.require'acp'.acpstart_complete"
 })
-
-command("AcpStop", function()
-	require("acp").stop(0)
-end, { desc = "Stop ACP connection for current buffer" })

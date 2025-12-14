@@ -3,4 +3,3 @@
 .PHONY: build
 build:
 	go build -o bin/acp-nvim -buildvcs=false
-	chmod +x bin/acp-nvim

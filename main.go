@@ -17,14 +17,14 @@ import (
 
 // ACPSession represents a single ACP session tied to a buffer
 type ACPSession struct {
-	bufnr       int
-	nvim        *nvim.Nvim
-	conn        *acp.ClientSideConnection
-	sessionID   acp.SessionId
-	ctx         context.Context
-	cancel      context.CancelFunc
-	cmd         *exec.Cmd
-	autoApprove bool
+	bufnr          int
+	nvim           *nvim.Nvim
+	conn           *acp.ClientSideConnection
+	sessionID      acp.SessionId
+	ctx            context.Context
+	cancel         context.CancelFunc
+	cmd            *exec.Cmd
+	autoApprove    bool
 }
 
 // SessionManager manages multiple ACP sessions
@@ -68,7 +68,6 @@ func (c *acpClientImpl) RequestPermission(ctx context.Context, params acp.Reques
 		promptLines = append(promptLines, fmt.Sprintf("%d. %s (%s)", i+1, opt.Name, opt.Kind))
 	}
 
-	// Call inputlist() directly from Go
 	var choice int
 	err := c.session.nvim.Call("inputlist", &choice, promptLines)
 	if err != nil {
@@ -144,6 +143,7 @@ func (c *acpClientImpl) SessionUpdate(ctx context.Context, params acp.SessionNot
 		}
 	case u.UserMessageChunk != nil:
 		// Silent for user messages
+	case u.CurrentModeUpdate != nil:
 	}
 	return nil
 }
@@ -302,6 +302,8 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string
 	}
 	session.sessionID = newSess.SessionId
 
+	m.nvim.ExecLua(`require('acp').set_and_show_prompt_buf(...)`, nil, bufnr, map[string]acp.SessionModeState{ "modes" : *newSess.Modes})
+	
 	m.sessions[bufnr] = session
 	return nil, nil
 }
@@ -322,7 +324,6 @@ func (m *SessionManager) ACPStop(bufnr int) (any, error) {
 	return nil, nil
 }
 
-// ACPSendPrompt sends a prompt to OpenCode for a specific buffer
 func (m *SessionManager) ACPSendPrompt(bufnr int, prompt string) (any, error) {
 	if prompt == "" {
 		return nil, fmt.Errorf("no prompt provided")
@@ -368,14 +369,35 @@ func (m *SessionManager) ACPCancel(bufnr int) (any, error) {
 
 	err := session.conn.Cancel(session.ctx, acp.CancelNotification{SessionId: session.sessionID})
 	if err != nil {
-		session.appendToBuffer(fmt.Sprintf("Cancel error: %v\n", err))
+		fmt.Printf("Cancel error: %v", err)
 		return nil, err
 	}
 	session.appendToBuffer("Cancelled.\n")
 	return nil, nil
 }
 
-// Helper methods
+// ACPSetMode sets the mode for an ACP session
+func (m *SessionManager) ACPSetMode(bufnr int, modeId string) (any, error) {
+	m.mu.Lock()
+	session, exists := m.sessions[bufnr]
+	m.mu.Unlock()
+
+	if !exists {
+		return nil, fmt.Errorf("no ACP session for buffer %d", bufnr)
+	}
+
+	// Call setSessionMode on the agent
+	_, err := session.conn.SetSessionMode(session.ctx, acp.SetSessionModeRequest{
+		SessionId: session.sessionID,
+		ModeId:    acp.SessionModeId(modeId),
+	})
+	if err != nil {
+		fmt.Printf("Set mode error: %v\n", err)
+		return nil, err
+	}
+
+	return modeId, nil
+}
 
 func (s *ACPSession) cleanup() {
 	if s.cancel != nil {
@@ -392,7 +414,10 @@ func (s *ACPSession) cleanup() {
 }
 
 func (s *ACPSession) appendToBuffer(text string) {
-	s.nvim.ExecLua(`require('acp').append_text(...)`, nil, s.bufnr, text)
+	err := s.nvim.ExecLua(`return require('acp').append_text(...)`, nil, s.bufnr, text)
+	if err != nil {
+		log.Printf("Error appending to buffer: %v\n", err)
+	}
 }
 
 func (s *ACPSession) showDiff(path string, oldText *string, newText string) {
@@ -458,6 +483,7 @@ func main() {
 	v.RegisterHandler("ACPStop", manager.ACPStop)
 	v.RegisterHandler("ACPSendPrompt", manager.ACPSendPrompt)
 	v.RegisterHandler("ACPCancel", manager.ACPCancel)
+	v.RegisterHandler("ACPSetMode", manager.ACPSetMode)
 
 	// Serve RPC requests
 	if err := v.Serve(); err != nil {
