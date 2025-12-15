@@ -1,13 +1,26 @@
 local M = {}
 
----@class AcpAgentConfig
+---@class acp.AgentConfig
 ---@field cmd string[] Command to start the agent (e.g., {"opencode", "acp"})
 ---@field env table<string, string>? Optional environment variables
+---@field mcp? string[]|true List of context server names to use, or true to use all defined
 
----@class AcpConfig
----@field agents? table<string, AcpAgentConfig> Mapping of agent names to their configurations
+---@class acp.McpConfig.Http
+---@field type "http"|"sse"
+---@field url string URL of the HTTP context server
+---@field headers? table<string, string> Optional HTTP headers
 
----@class acpSessionModes
+---@class acp.McpConfig.Stdio
+---@field cmd string[]
+---@field env table<string, string>
+
+---@alias acp.McpConfig acp.McpConfig.Http|acp.McpConfig.Stdio
+
+---@class acp.Config
+---@field agents? table<string, acp.AgentConfig> Mapping of agent names to their configurations
+---@field mcp? table<string, acp.McpConfig> Mapping of context server names to their configurations
+
+---@class acp.SessionModes
 ---@field CurrentModeId string
 ---@field AvailableModes { Description: string, Id: string, Name: string }[]
 
@@ -15,19 +28,19 @@ local M = {}
 local script_path = debug.getinfo(1, "S").source:sub(2)
 local plugin_dir = vim.fs.dirname(vim.fs.dirname(script_path))
 
----@class AcpState
+---@class acp.State
 ---@field rpc_host_job_id number? Job ID of the RPC host process
----@field sessions table<number, { agent: string, window: number?, modes: acpSessionModes? }> Active sessions per buffer
+---@field sessions table<number, { agent: string, window: number?, modes: acp.SessionModes? }> Active sessions per buffer
 M.state = {
 	rpc_host_job_id = nil, -- Single RPC host for all sessions
 	sessions = {},      -- { [bufnr] = { agent = "opencode", window = win_id } }
 }
 
----@type AcpConfig
+---@type acp.Config
 local default_config = {}
 
----@type AcpConfig
-M.config = vim.tbl_deep_extend("force", default_config, vim.g.agent_chat or {})
+---@type acp.Config
+M.config = vim.tbl_deep_extend("force", default_config, vim.g.acp or {})
 
 -- Start RPC host if not already running
 local function ensure_rpc_host()
@@ -81,14 +94,28 @@ function M.start(agent)
 
 	-- Create new buffer
 	local bufnr = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(bufnr, "ACP: " .. agent)
+    vim.api.nvim_buf_set_name(bufnr, "acp://" .. agent)
 
 	-- Track the session
-	M.state.sessions[bufnr] = { agent = agent, modes = nil }
+    M.state.sessions[bufnr] = { agent = agent, modes = nil }
 
-	-- Initialize ACP connection for this buffer
+	local mcp
+
+	if M.config.agents[agent].mcp then
+        local mcp_names = M.config.agents[agent].mcp
+		if vim.islist(mcp_names) then
+            mcp = {}
+            for _, name in ipairs(mcp_names --[[@as string[] ]]) do
+				mcp[name] = M.config.mcp[name]
+			end
+        else
+			mcp = M.config.mcp
+		end
+	end
+
 	local opts = {
-		env = M.config.agents[agent].env or vim.empty_dict(),
+        env = M.config.agents[agent].env or vim.empty_dict(),
+		mcp = mcp,
 	}
 	vim.rpcnotify(job_id, "ACPStart", bufnr, cmd, opts)
 end
@@ -191,7 +218,7 @@ end
 
 --- Called from Go
 ---@param bufnr number
----@param opts { modes: acpSessionModes }
+---@param opts { modes: acp.SessionModes }
 function M.set_and_show_prompt_buf(bufnr, opts)
 	show(bufnr)
 	vim.bo[bufnr].filetype = "acpchat"

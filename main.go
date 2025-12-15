@@ -17,13 +17,13 @@ import (
 
 // ACPSession represents a single ACP session tied to a buffer
 type ACPSession struct {
-	bufnr          int
-	conn           *acp.ClientSideConnection
-	sessionID      acp.SessionId
-	ctx            context.Context
-	cancel         context.CancelFunc
-	cmd            *exec.Cmd
-	autoApprove    bool
+	bufnr       int
+	conn        *acp.ClientSideConnection
+	sessionID   acp.SessionId
+	ctx         context.Context
+	cancel      context.CancelFunc
+	cmd         *exec.Cmd
+	autoApprove bool
 }
 
 // SessionManager manages multiple ACP sessions
@@ -215,8 +215,98 @@ func (c *acpClientImpl) KillTerminalCommand(ctx context.Context, params acp.Kill
 
 // SessionManager methods exposed to Lua
 
+type ACPStartOpts struct {
+	Env map[string]string `json:"env" msgpack:"env"`
+	Mcp map[string]map[string]any   `json:"mcp" msgpack:"mcp"`
+}
+
+func ConvertMcpConfigToMcpServer(name string, config map[string]any) (*acp.McpServer, error) {
+    // Detect transport type
+    t, _ := config["type"].(string)
+
+    switch t {
+    case "http", "sse":
+        // Map headers - initialize to empty slice to avoid nil
+        headers := make([]acp.HttpHeader, 0)
+        if rawHeaders, ok := config["headers"].(map[string]any); ok {
+            for k, v := range rawHeaders {
+                strVal, _ := v.(string)
+                headers = append(headers, acp.HttpHeader{Name: k, Value: strVal})
+            }
+        }
+
+        serverName := name
+        if n, ok := config["name"].(string); ok {
+            serverName = n
+        }
+
+        if t == "http" {
+            return &acp.McpServer{
+                Http: &acp.McpServerHttp{
+                    Name:    serverName,
+                    Type:    "http",
+                    Url:     config["url"].(string),
+                    Headers: headers,
+                },
+            }, nil
+        } else { // sse
+            return &acp.McpServer{
+                Sse: &acp.McpServerSse{
+                    Name:    serverName,
+                    Type:    "sse",
+                    Url:     config["url"].(string),
+                    Headers: headers,
+                },
+            }, nil
+        }
+
+    default:
+        // Default to stdio
+        // Initialize to empty slice to avoid nil
+        args := make([]string, 0)
+        if cmdSlice, ok := config["cmd"].([]any); ok && len(cmdSlice) > 1 {
+            for _, a := range cmdSlice[1:] {
+                if str, ok := a.(string); ok {
+                    args = append(args, str)
+                }
+            }
+        }
+
+        var command string
+        if cmdSlice, ok := config["cmd"].([]any); ok && len(cmdSlice) > 0 {
+            if str, ok := cmdSlice[0].(string); ok {
+                command = str
+            }
+        }
+
+        // Initialize to empty slice to avoid nil
+        env := make([]acp.EnvVariable, 0)
+        if rawEnv, ok := config["env"].(map[string]any); ok {
+            for k, v := range rawEnv {
+                if strVal, ok := v.(string); ok {
+                    env = append(env, acp.EnvVariable{Name: k, Value: strVal})
+                }
+            }
+        }
+
+        serverName := name
+        if n, ok := config["name"].(string); ok {
+            serverName = n
+        }
+
+        return &acp.McpServer{
+            Stdio: &acp.McpServerStdio{
+                Name:    serverName,
+                Command: command,
+                Args:    args,
+                Env:     env,
+            },
+        }, nil
+    }
+}
+
 // ACPStart initializes an ACP connection for a buffer
-func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string]map[string]string) (any, error) {
+func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts ACPStartOpts) (any, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -236,9 +326,9 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string
 	cmd.Stderr = os.Stderr
 
 	// Set environment variables from opts.env if provided
-	if opts != nil && opts["env"] != nil {
+	if opts.Env != nil {
 		cmd.Env = os.Environ()
-		for key, value := range opts["env"] {
+		for key, value := range opts.Env {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 		}
 	}
@@ -260,7 +350,7 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string
 	session.conn = acp.NewClientSideConnection(client, stdin, stdout)
 
 	// Initialize
-	_, err = session.conn.Initialize(session.ctx, acp.InitializeRequest{
+	initRes, err := session.conn.Initialize(session.ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs:       acp.FileSystemCapability{ReadTextFile: true, WriteTextFile: true},
@@ -279,13 +369,41 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts map[string
 	}
 
 	// Create new session
-	cwd, _ := os.Getwd()
-	if cwd == "" {
-		cwd = "."
+	cwd, err := os.Getwd()
+	if err != nil {
+		session.cleanup()
+		return nil, fmt.Errorf("getwd error: %w", err)
 	}
+
+	var mcpServers []acp.McpServer
+	for name, config := range opts.Mcp {
+		srv, err := ConvertMcpConfigToMcpServer(name, config)
+		if err != nil {
+			session.cleanup()
+			return nil, fmt.Errorf("invalid MCP server config for %s: %w", name, err)
+		}
+		mcpServers = append(mcpServers, *srv)
+	}
+
+	supportHttpMcp := initRes.AgentCapabilities.McpCapabilities.Http
+	supportSseMcp := initRes.AgentCapabilities.McpCapabilities.Sse
+
+	// if not support http or sse, filter them out
+	filteredMcpServers := make([]acp.McpServer, 0)
+	for _, srv := range mcpServers {
+		if srv.Http != nil && !supportHttpMcp {
+			continue
+		}
+		if srv.Sse != nil && !supportSseMcp {
+			continue
+		}
+		filteredMcpServers = append(filteredMcpServers, srv)
+	}
+	mcpServers = filteredMcpServers
+
 	newSess, err := session.conn.NewSession(session.ctx, acp.NewSessionRequest{
 		Cwd:        cwd,
-		McpServers: []acp.McpServer{},
+		McpServers: mcpServers,
 	})
 	if err != nil {
 		session.cleanup()
