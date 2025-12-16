@@ -1,4 +1,6 @@
 local M = {}
+local vim = vim
+local api = vim.api
 
 ---@class acp.AgentConfig
 ---@field cmd string[] Command to start the agent (e.g., {"opencode", "acp"})
@@ -93,8 +95,7 @@ function M.start(agent)
 	end
 
 	-- Create new buffer
-	local bufnr = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(bufnr, "acp://" .. agent)
+	local bufnr = api.nvim_create_buf(false, true)
 
 	-- Track the session
     M.state.sessions[bufnr] = { agent = agent, modes = nil }
@@ -164,7 +165,7 @@ end
 -- Show the ACP buffer in a window
 ---@param bufnr number
 local function show(bufnr)
-    if not vim.api.nvim_buf_is_valid(bufnr) then
+    if not api.nvim_buf_is_valid(bufnr) then
         vim.notify("Invalid buffer", vim.log.levels.ERROR)
         return
     end
@@ -176,15 +177,15 @@ local function show(bufnr)
     end
 
     -- Check if already visible in a window
-    if session.window and vim.api.nvim_win_is_valid(session.window) then
-        vim.api.nvim_set_current_win(session.window)
+    if session.window and api.nvim_win_is_valid(session.window) then
+        api.nvim_set_current_win(session.window)
         return
     end
 
     -- Create a split window
     vim.cmd("vsplit")
-    local window = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(window, bufnr)
+    local window = api.nvim_get_current_win()
+    api.nvim_win_set_buf(window, bufnr)
     vim.wo[window].wrap = true
     vim.wo[window].linebreak = true
 
@@ -218,8 +219,9 @@ end
 
 --- Called from Go
 ---@param bufnr number
----@param opts { modes: acp.SessionModes }
+---@param opts { modes: acp.SessionModes, session_id: string }
 function M.set_and_show_prompt_buf(bufnr, opts)
+	api.nvim_buf_set_name(bufnr, ("acp://%s/%s"):format(M.state.sessions[bufnr].agent, opts.session_id))
 	show(bufnr)
 	vim.bo[bufnr].filetype = "acpchat"
 	M.state.sessions[bufnr].modes = opts.modes
@@ -246,13 +248,13 @@ end
 ---@param bufnr number
 ---@param text string
 function M.append_text(bufnr, text)
-	if not vim.api.nvim_buf_is_valid(bufnr) then
+	if not api.nvim_buf_is_valid(bufnr) then
 		return
 	end
 
 	vim.schedule(function()
 		-- Get the prompt line position using the ': mark
-		local prompt_pos = vim.api.nvim_buf_get_mark(bufnr, ":")
+		local prompt_pos = api.nvim_buf_get_mark(bufnr, ":")
 		local prompt_line = prompt_pos[1] -- 1-indexed line number
 
 		-- Get the line just before the prompt (where we append content)
@@ -260,12 +262,12 @@ function M.append_text(bufnr, text)
 
 		if content_line_idx < 0 then
 			-- No content line exists yet, insert a new line before prompt
-			vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, { "" })
+			api.nvim_buf_set_lines(bufnr, 0, 0, false, { "" })
 			content_line_idx = 0
 		end
 
 		-- Get the current content of that line
-		local current_line = vim.api.nvim_buf_get_lines(bufnr, content_line_idx, content_line_idx + 1, false)[1] or ""
+		local current_line = api.nvim_buf_get_lines(bufnr, content_line_idx, content_line_idx + 1, false)[1] or ""
 
 		-- Append the new text to the current line
 		local new_text = current_line .. text
@@ -274,13 +276,13 @@ function M.append_text(bufnr, text)
 		local lines = vim.split(new_text, "\n", { plain = true })
 
 		-- Replace the current line and add any additional lines
-		vim.api.nvim_buf_set_lines(bufnr, content_line_idx, content_line_idx + 1, false, lines)
+		api.nvim_buf_set_lines(bufnr, content_line_idx, content_line_idx + 1, false, lines)
 
 		-- Scroll to the bottom if the window is visible
 		local session = M.state.sessions[bufnr]
-		if session and session.window and vim.api.nvim_win_is_valid(session.window) then
-			local new_line_count = vim.api.nvim_buf_line_count(bufnr)
-			vim.api.nvim_win_set_cursor(session.window, { new_line_count, 0 })
+		if session and session.window and api.nvim_win_is_valid(session.window) then
+			local new_line_count = api.nvim_buf_line_count(bufnr)
+			api.nvim_win_set_cursor(session.window, { new_line_count, 0 })
 		end
 	end)
 end
@@ -291,7 +293,7 @@ function M.acpstart_complete()
 end
 
 function M.acpsetmode_complete()
-    local buf = vim.api.nvim_get_current_buf()
+    local buf = api.nvim_get_current_buf()
     return vim.iter(M.state.sessions[buf].modes.AvailableModes):map(function(mode)
         return mode.Id
     end):join("\n")
