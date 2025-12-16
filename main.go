@@ -15,8 +15,8 @@ import (
 	"github.com/neovim/go-client/nvim"
 )
 
-// ACPSession represents a single ACP session tied to a buffer
-type ACPSession struct {
+// AcpSession represents a single ACP session tied to a buffer
+type AcpSession struct {
 	bufnr       int
 	conn        *acp.ClientSideConnection
 	sessionID   acp.SessionId
@@ -29,11 +29,11 @@ type ACPSession struct {
 // SessionManager manages multiple ACP sessions
 type SessionManager struct {
 	mu       sync.Mutex
-	sessions map[int]*ACPSession
+	sessions map[int]*AcpSession
 }
 
 type acpClientImpl struct {
-	session *ACPSession
+	session *AcpSession
 }
 
 var vim *nvim.Nvim
@@ -215,7 +215,7 @@ func (c *acpClientImpl) KillTerminalCommand(ctx context.Context, params acp.Kill
 
 // SessionManager methods exposed to Lua
 
-type ACPStartOpts struct {
+type AcpNewSessionOpts struct {
 	Env map[string]string `json:"env" msgpack:"env"`
 	Mcp map[string]map[string]any   `json:"mcp" msgpack:"mcp"`
 }
@@ -305,8 +305,8 @@ func ConvertMcpConfigToMcpServer(name string, config map[string]any) (*acp.McpSe
     }
 }
 
-// ACPStart initializes an ACP connection for a buffer
-func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts ACPStartOpts) (any, error) {
+// AcpNewSession initializes an ACP connection for a buffer
+func (m *SessionManager) AcpNewSession(bufnr int, agent_cmd []string, opts AcpNewSessionOpts) (any, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -314,7 +314,7 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts ACPStartOp
 		return nil, fmt.Errorf("ACP session already exists for buffer %d", bufnr)
 	}
 
-	session := &ACPSession{
+	session := &AcpSession{
 		bufnr:       bufnr,
 		autoApprove: false,
 	}
@@ -427,8 +427,8 @@ func (m *SessionManager) ACPStart(bufnr int, agent_cmd []string, opts ACPStartOp
 	return nil, nil
 }
 
-// ACPStop closes the ACP connection for a buffer
-func (m *SessionManager) ACPStop(bufnr int) (any, error) {
+// AcpStop closes the ACP connection for a buffer
+func (m *SessionManager) AcpStop(bufnr int) (any, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -443,7 +443,7 @@ func (m *SessionManager) ACPStop(bufnr int) (any, error) {
 	return nil, nil
 }
 
-func (m *SessionManager) ACPSendPrompt(bufnr int, prompt string) (any, error) {
+func (m *SessionManager) AcpSendPrompt(bufnr int, prompt string) (any, error) {
 	if prompt == "" {
 		return nil, fmt.Errorf("no prompt provided")
 	}
@@ -476,8 +476,8 @@ func (m *SessionManager) ACPSendPrompt(bufnr int, prompt string) (any, error) {
 	return nil, nil
 }
 
-// ACPCancel cancels the current prompt for a buffer
-func (m *SessionManager) ACPCancel(bufnr int) (any, error) {
+// AcpCancel cancels the current prompt for a buffer
+func (m *SessionManager) AcpCancel(bufnr int) (any, error) {
 	m.mu.Lock()
 	session, exists := m.sessions[bufnr]
 	m.mu.Unlock()
@@ -495,8 +495,8 @@ func (m *SessionManager) ACPCancel(bufnr int) (any, error) {
 	return nil, nil
 }
 
-// ACPSetMode sets the mode for an ACP session
-func (m *SessionManager) ACPSetMode(bufnr int, modeId string) (any, error) {
+// AcpSetMode sets the mode for an ACP session
+func (m *SessionManager) AcpSetMode(bufnr int, modeId string) (any, error) {
 	m.mu.Lock()
 	session, exists := m.sessions[bufnr]
 	m.mu.Unlock()
@@ -518,7 +518,7 @@ func (m *SessionManager) ACPSetMode(bufnr int, modeId string) (any, error) {
 	return modeId, nil
 }
 
-func (s *ACPSession) cleanup() {
+func (s *AcpSession) cleanup() {
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -532,14 +532,14 @@ func (s *ACPSession) cleanup() {
 	s.cmd = nil
 }
 
-func (s *ACPSession) appendToBuffer(text string) {
+func (s *AcpSession) appendToBuffer(text string) {
 	err := vim.ExecLua(`return require('acp').append_text(...)`, nil, s.bufnr, text)
 	if err != nil {
 		log.Printf("Error appending to buffer: %v\n", err)
 	}
 }
 
-func (s *ACPSession) showDiff(path string, oldText *string, newText string) {
+func (s *AcpSession) showDiff(path string, oldText *string, newText string) {
 	var old string
 	if oldText != nil {
 		old = *oldText
@@ -594,15 +594,15 @@ func main() {
 
 	// Create session manager
 	manager := &SessionManager{
-		sessions: make(map[int]*ACPSession),
+		sessions: make(map[int]*AcpSession),
 	}
 
 	// Register RPC handlers
-	vim.RegisterHandler("ACPStart", manager.ACPStart)
-	vim.RegisterHandler("ACPStop", manager.ACPStop)
-	vim.RegisterHandler("ACPSendPrompt", manager.ACPSendPrompt)
-	vim.RegisterHandler("ACPCancel", manager.ACPCancel)
-	vim.RegisterHandler("ACPSetMode", manager.ACPSetMode)
+	vim.RegisterHandler("AcpNewSession", manager.AcpNewSession)
+	vim.RegisterHandler("AcpStop", manager.AcpStop)
+	vim.RegisterHandler("AcpSendPrompt", manager.AcpSendPrompt)
+	vim.RegisterHandler("AcpCancel", manager.AcpCancel)
+	vim.RegisterHandler("AcpSetMode", manager.AcpSetMode)
 
 	// Serve RPC requests
 	if err := vim.Serve(); err != nil {

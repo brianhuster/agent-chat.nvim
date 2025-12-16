@@ -118,7 +118,7 @@ function M.start(agent)
         env = M.config.agents[agent].env or vim.empty_dict(),
 		mcp = mcp,
 	}
-	vim.rpcnotify(job_id, "ACPStart", bufnr, cmd, opts)
+	vim.rpcnotify(job_id, "AcpNewSession", bufnr, cmd, opts)
 end
 
 -- Stop the ACP connection for a buffer
@@ -135,7 +135,7 @@ function M.stop(bufnr)
 	end
 
 	-- Stop the session
-	local ok, err = pcall(vim.rpcrequest, M.state.rpc_host_job_id, "ACPStop", bufnr)
+	local ok, err = pcall(vim.rpcrequest, M.state.rpc_host_job_id, "AcpStop", bufnr)
 	if not ok then
 		vim.notify("Failed to stop ACP session: " .. vim.inspect(err), vim.log.levels.ERROR)
 	end
@@ -154,7 +154,7 @@ end
 --- @param bufnr number
 --- @param mode_id string
 function M.set_mode(bufnr, mode_id)
-	local ok, result = pcall(vim.rpcrequest, M.state.rpc_host_job_id, "ACPSetMode", bufnr, mode_id)
+	local ok, result = pcall(vim.rpcrequest, M.state.rpc_host_job_id, "AcpSetMode", bufnr, mode_id)
 	if not ok then
 		vim.notify("Failed to set ACP mode: " .. vim.inspect(result), vim.log.levels.ERROR)
 		return
@@ -201,7 +201,7 @@ end
 ---@param text string
 function M.send_prompt(bufnr, text)
 	if not M.state.rpc_host_job_id then
-		vim.notify("ACP not running. Run :AcpStart first.", vim.log.levels.ERROR)
+		vim.notify("ACP not running. Run :AcpNewSession first.", vim.log.levels.ERROR)
 		return
 	end
 
@@ -214,7 +214,7 @@ function M.send_prompt(bufnr, text)
 		return
 	end
 
-	vim.rpcnotify(M.state.rpc_host_job_id, "ACPSendPrompt", bufnr, text)
+	vim.rpcnotify(M.state.rpc_host_job_id, "AcpSendPrompt", bufnr, text)
 end
 
 --- Called from Go
@@ -240,7 +240,7 @@ function M.cancel(bufnr)
 		return
 	end
 
-	vim.rpcnotify(M.state.rpc_host_job_id, "ACPCancel", bufnr)
+	vim.rpcnotify(M.state.rpc_host_job_id, "AcpCancel", bufnr)
 end
 
 -- Append text to a specific buffer

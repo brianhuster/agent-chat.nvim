@@ -1,6 +1,6 @@
 local command = vim.api.nvim_create_user_command
 
-command("AcpStart", function(opts)
+command("ACPNewSession", function(opts)
 	require("acp").start(opts.args)
 end, {
 	nargs = 1,
