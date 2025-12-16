@@ -1,6 +1,6 @@
 module acp
 
-go 1.24.1
+go 1.22
 
 require (
 	github.com/coder/acp-go-sdk v0.6.3
