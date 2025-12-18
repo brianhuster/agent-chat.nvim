@@ -28,7 +28,8 @@ local api = vim.api
 
 -- Get the directory where this script is located
 local script_path = debug.getinfo(1, "S").source:sub(2)
-local plugin_dir = vim.fs.dirname(vim.fs.dirname(script_path))
+local dirname = vim.fs.dirname
+local plugin_dir = dirname(dirname(dirname(script_path)))
 
 ---@class acp.State
 ---@field rpc_host_job_id number? Job ID of the RPC host process

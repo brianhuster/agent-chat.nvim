@@ -389,6 +389,11 @@ func (m *SessionManager) AcpNewSession(bufnr int, agent_cmd []string, opts AcpNe
 			Fs:       acp.FileSystemCapability{ReadTextFile: true, WriteTextFile: true},
 			Terminal: true,
 		},
+		ClientInfo: &acp.Implementation{
+			Name:    "brianhuster/acp.nvim",
+			Title: starString("ACP client plugin for Neovim"),
+			Version: "0.1.0-alpha",
+		},
 	})
 	if err != nil {
 		session.cleanup()

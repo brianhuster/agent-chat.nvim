@@ -10,7 +10,7 @@ type Vim struct {
 }
 
 type selectOpts struct {
-	Title string
+	Title string `msgpack:"title"`
 }
 
 // select displays a selection menu and returns the selected indexprompt
@@ -42,4 +42,8 @@ func (vim Vim) bufnr(name string, create bool) (nvim.Buffer, error) {
 		result = 1
 	}
 	return nvim.Buffer(result), err
+}
+
+func starString(s string) *string {
+	return &s
 }

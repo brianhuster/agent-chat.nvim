@@ -25,14 +25,6 @@ end, {
 	complete = "custom,v:lua.require'acp'.acpsetmode_complete"
 })
 
--- Auto-cleanup when buffer is deleted
-local auid = vim.api.nvim_create_autocmd("BufDelete", {
-	buffer = bufnr,
-	callback = function(args)
-		acp.stop(args.buf)
-	end
-})
-
 -- Highlight all lines started with the prompt OCP `"\027]133;A\a` as sign ▶
 vim.schedule(function()
 	vim.cmd [[
@@ -54,7 +46,6 @@ vim.b.undo_ftplugin = table.concat({
     vim.b.undo_ftplugin or "",
 	"setlocal buftype< bufhidden< swapfile< conceallevel< concealcursor",
     "delcommand -buffer AcpSetMode",
-    "call nvim_del_autocmd(" .. auid .. ")",
     "lua vim.treesitter.stop(" .. bufnr .. ")",
 	"nunmap <buffer> [[",
 	"nunmap <buffer> ]]",
