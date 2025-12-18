@@ -1,4 +1,5 @@
 vim.cmd [[set rtp+=..]]
+vim.o.clipboard = "unnamedplus"
 vim.g.acp = {
 	agents = {
 		test = {

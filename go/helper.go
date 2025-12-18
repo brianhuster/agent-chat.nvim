@@ -35,7 +35,11 @@ func (vim Vim) uiSelect(items []string, opts selectOpts) (int, error) {
 }
 
 func (vim Vim) bufnr(name string, create bool) (nvim.Buffer, error) {
-	var result nvim.Buffer
-	err := vim.api.Call("bufnr", &result, name, create)
-	return result, err
+	var result int
+	err := vim.api.Call("bufnr", &result, []byte(name), create)
+	// Handle if result is falsy (0) because of error in ACP client
+	if result == 0 {
+		result = 1
+	}
+	return nvim.Buffer(result), err
 }

@@ -138,6 +138,8 @@ func (c *acpClientImpl) SessionUpdate(ctx context.Context, params acp.SessionNot
 		if thought.Text != nil {
 			c.session.appendToBuffer(fmt.Sprintf("[Thought] %s\n", thought.Text.Text))
 		}
+	case u.AvailableCommandsUpdate != nil:
+		// TODO
 	case u.UserMessageChunk != nil:
 		// Silent for user messages
 	case u.CurrentModeUpdate != nil:
@@ -229,7 +231,7 @@ func (c *acpClientImpl) CreateTerminal(ctx context.Context, params acp.CreateTer
 }
 
 func (c *acpClientImpl) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{Output: "", Truncated: false}, nil
+	return acp.TerminalOutputResponse{Output: "Sorry, terminal support is not available yet", Truncated: false}, nil
 }
 
 func (c *acpClientImpl) ReleaseTerminal(ctx context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
